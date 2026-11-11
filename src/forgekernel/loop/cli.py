@@ -28,6 +28,7 @@ import tomllib
 from dataclasses import asdict, replace as dc_replace
 from pathlib import Path
 
+from forgekernel import codex_agent
 from forgekernel.baseline import (
     ARCH_BASELINE_FILENAME,
     BASELINE_FILENAME,
@@ -349,7 +350,7 @@ class RealBackend:
         """
         proc = subprocess.Popen(
             cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, cwd=self.workspace,
+            stderr=subprocess.PIPE, text=True, cwd=self.workspace, start_new_session=True,
         )
         box: dict = {}
 
@@ -371,11 +372,8 @@ class RealBackend:
                 print(f"[loop] agent turn ({role}) in progress — "
                       f"{(time.monotonic() - started) / 60:.0f} min so far", flush=True)
         except BaseException:
-            # Ctrl-C / SystemExit lands on THIS thread while the pump owns the
-            # pipes. `subprocess.run` killed the child on its way out; a Popen
-            # driven from a thread must do that by hand, or the agent (a claude
-            # process) outlives the loop and keeps spending API usage.
-            proc.kill()
+            # Give the timeout launcher time to forward SIGTERM to its own child group.
+            _end_process_group(proc, grace_s=12.0)
             pump.join(timeout=5)
             raise
         if "exc" in box:
@@ -386,10 +384,18 @@ class RealBackend:
         cmd = self.agent_cmd_for(role)
         if not cmd:
             raise AgentError("no --agent-cmd configured; cannot spawn an agent")
+        is_codex = codex_agent.matches(cmd)
+        if is_codex and self.agent_policy is None:
+            raise AgentError("Codex turns require a ForgeKernel agent policy")
         if self.agent_policy is not None:
-            # Rewritten before every turn, not once: teacher and student turns share the
-            # working directory, and nothing a turn does to the file may outlive it.
-            self.agent_policy.install(role, self.workspace)
+            if is_codex:
+                try:
+                    cmd = codex_agent.prepare(cmd, self.agent_policy, role, self.workspace)
+                except ValueError as e:
+                    raise AgentError(str(e)) from e
+            else:
+                # Teacher and student share the working directory, so rewrite before each turn.
+                self.agent_policy.install(role, self.workspace)
             prompt = self.agent_policy.notice(role) + prompt
         last = ""
         attempt = 0

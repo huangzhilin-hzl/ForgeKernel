@@ -13,3 +13,7 @@ source = "reference"                 # the teacher may read it (source mode)
 [budget]
 hours    = 2
 max_meta = 1
+
+[agent]
+backend = "codex"
+model   = "default"

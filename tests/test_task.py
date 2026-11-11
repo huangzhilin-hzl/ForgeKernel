@@ -100,6 +100,20 @@ def test_reference_with_source_is_source_mode(tmp_path):
     assert t.reference.source == (tmp_path / "tasks" / "rmsnorm" / "reference").resolve()
 
 
+def test_codex_is_selected_per_role_and_needs_a_reference_for_the_teacher(tmp_path):
+    from forgekernel import agents, codex_agent
+
+    codex = 'backend = "codex"\nmodel = "default"\n'
+    t = load_task(_task(tmp_path, WITH_REF + '[agent.student]\n' + codex, files=REF_FILES),
+                  kb_root=_kb(tmp_path))
+    assert t.teacher.backend == "claude"
+    assert t.student.backend == "codex" and t.student.model == "default"
+    assert codex_agent.matches(agents.agent_command(t.student, "student"))
+    with pytest.raises(TaskError, match=r"Codex needs a \[reference\]"):
+        load_task(_task(tmp_path, MINIMAL + '[agent]\n' + codex, name="generate"),
+                  kb_root=_kb(tmp_path))
+
+
 def test_reference_without_source_is_blackbox(tmp_path):
     toml = MINIMAL + '[reference]\nrun = "reference/run.py:run"\n'
     t = load_task(_task(tmp_path, toml, files=REF_FILES), kb_root=_kb(tmp_path))
@@ -128,7 +142,7 @@ def test_every_problem_is_reported_at_once(tmp_path):
     toml = ('[task]\nlanguage = "triton"\narch = "h100"\n'
             '[target]\nratio = 1.5\nms = 0.2\ntiming = "wall"\n'
             '[budget]\nhours = 0\nmax_meta = -1\n'
-            '[agent.student]\nbackend = "codex"\n'
+            '[agent.student]\nbackend = "unsupported"\n'
             '[extra]\nx = 1\n')
     with pytest.raises(TaskError) as e:
         load_task(_task(tmp_path, toml, shapes=False, description=None), kb_root=_kb(tmp_path))

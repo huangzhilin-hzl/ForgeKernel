@@ -83,7 +83,7 @@ LANGUAGES = ("cutedsl", "cuda")
 # The loop's own language name for each task language (forgekernel.loop.lang_mode).
 LOOP_LANGUAGE = {"cutedsl": "cutedsl", "cuda": "cuda-sol"}
 TIMINGS = ("device", "e2e")
-BACKENDS = ("claude",)
+BACKENDS = ("claude", "codex")
 ROLES = ("teacher", "student")
 MIN_INPUT_GROUPS = 3
 
@@ -277,6 +277,12 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
     teacher = _read_agent(cfg.get("agent", {}), "teacher", problems)
     student = _read_agent(cfg.get("agent", {}), "student", problems)
     budget = _read_budget(cfg, problems)
+    if teacher.backend == "codex" and board is None and reference is None:
+        problems.append("[agent.teacher] Codex needs a [reference] for ordinary tasks. "
+                        "Generating a reference uses the Claude Code /goal session.")
+    if (teacher.backend == "codex" and reference and reference.deny_urls
+            and (reference.blackbox or reference.source is None)):
+        problems.append('[agent.teacher] blackbox reference URL restrictions require Claude Code')
 
     if problems:
         raise TaskError(d, problems)
@@ -663,6 +669,8 @@ def _read_agent(agents: dict, role: str, problems: list[str]) -> AgentSpec:
     if provider not in known:
         problems.append(f"{where} provider must be one of {list(known)} (global_config/"
                         f"{provider_mod.BACKENDS_FILE}), got {provider!r}")
+    elif backend == "codex" and provider != provider_mod.NATIVE:
+        problems.append(f'{where} Codex uses provider = "native" (Codex CLI authentication)')
     model = a.get("model")
     if not isinstance(model, str) or not model.strip():
         problems.append(f"{where} model must be a model name, got {model!r}")

@@ -171,7 +171,8 @@ def describe(task, machine) -> str:
 
 def _agent_line(spec) -> str:
     extra = [x for x in (spec.effort, None if spec.provider == "native" else spec.provider) if x]
-    return spec.model + (f" ({', '.join(extra)})" if extra else "")
+    label = f"codex/{spec.model}" if spec.backend == "codex" else spec.model
+    return label + (f" ({', '.join(extra)})" if extra else "")
 
 
 def _check_providers(task, machine) -> None:
