@@ -3460,6 +3460,7 @@ def test_price_log_verdict_reads_the_tool_closing_lines_not_the_rows():
     assert _price_log_verdict("") is None
     # the closing line: last line, outer task
     assert archive_is_whole("x\n[gpu_entry.sh] task=cmd finished\n\n", "cmd")
+    assert archive_is_whole("x\n[gpu_entry.sh] task=cmd finished\nFORGEKERNEL_REMOTE_EXIT\n", "cmd")
     assert not archive_is_whole("x\n[gpu_entry.sh] task=ncu finished\n", "cmd")       # nested entry
     assert not archive_is_whole("x\n[gpu_entry.sh] task=ncu finished\nORCH-CENSUS a=1\n")
     assert archive_is_whole("[gpu_entry] task=ncu finished")

@@ -47,7 +47,7 @@ import sys
 # `bash -lc 'ssh ...'`, `tmux new -d 'ssh ...'`. Only a boundary is required after the
 # name, so a file that merely starts with it (`ssh_helper.py`) is not matched.
 _NET_CMD = re.compile(r"""(?:^|[\s;&|(`$'"])(?:
-      curl | wget | aria2c | scp | sftp | rsync | ssh | ncat | telnet | ftp
+      curl | wget | aria2c | scp | sftp | rsync | ssh | kubectl | ncat | telnet | ftp
     | nc\s+-\S*
     | git\s+(?:clone|fetch|pull|ls-remote|remote)
     | (?:pip3?|python3?\s+-m\s+pip|uv\s+pip)\s+(?:install|download)
@@ -62,7 +62,7 @@ _NET_URL = re.compile(r"\b(?:https?|ftps?|git|ssh|rsync)://", re.I)
 # The ways to the GPU machine, for a student that keeps the network (no_cluster without
 # offline): also by path (`/usr/bin/ssh`), which the deny rules do not match.
 _CLUSTER_CMD = re.compile(
-    r"""(?:^|[\s;&|(`$'"/])(?:ssh|scp|rsync|python3?\s+-m\s+forgekernel\.submit)(?:\s|$)""",
+    r"""(?:^|[\s;&|(`$'"/])(?:ssh|scp|rsync|kubectl|python3?\s+-m\s+forgekernel\.submit)(?:\s|$)""",
     re.I)
 
 

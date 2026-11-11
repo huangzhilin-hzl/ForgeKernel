@@ -45,6 +45,22 @@ def test_ssh_needs_a_host_and_a_dedicated_workdir(tmp_path):
     assert "needs REMOTE_HOST" in text and "needs REMOTE_WORKDIR" in text
 
 
+def test_kubectl_target_uses_the_controller_kubeconfig(tmp_path):
+    m = load_machine(tmp_path, environ={"FK_DELIVERY": "kubectl", "HOME": str(tmp_path),
+                     "KUBECTL_KUBECONFIG": "$HOME/.kube/config", "KUBECTL_NAMESPACE": "ml",
+                     "KUBECTL_POD": "gpu-worker", "KUBECTL_CONTAINER": "workspace",
+                     "REMOTE_WORKDIR": "/data/fk"})
+    assert m.kubectl_kubeconfig == str(tmp_path / ".kube/config")
+    assert m.describe() == "kubectl ml/gpu-worker:workspace /data/fk (GPU 0)"
+
+
+def test_kubectl_needs_an_explicit_target_and_dedicated_workdir(tmp_path):
+    with pytest.raises(MachineError) as e:
+        load_machine(tmp_path, environ={"FK_DELIVERY": "kubectl", "REMOTE_WORKDIR": "/tmp/fk/.."})
+    assert all(key in str(e.value) for key in (
+        "KUBECTL_NAMESPACE", "KUBECTL_POD", "KUBECTL_CONTAINER", "REMOTE_WORKDIR"))
+
+
 def test_a_malformed_line_is_refused_not_dropped(tmp_path):
     (tmp_path / "local.env").write_text("ANTHROPIC_API_KEY sk-oops\n")
     with pytest.raises(MachineError, match="line 1 is not KEY=VALUE"):

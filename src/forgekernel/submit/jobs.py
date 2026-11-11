@@ -44,6 +44,8 @@ STATUS_LOST = "Lost"
 # The first line a job's command prints on the GPU machine: everything before it is
 # transport (the copy, the ssh session), everything after it is the job.
 BEGIN_MARKER = "FK_JOB_BEGIN"
+# The kubectl stream carries this after the remote shell exits.
+REMOTE_EXIT_MARKER = "FORGEKERNEL_REMOTE_EXIT"
 # The job never reached the GPU machine: the copy or the ssh session failed every
 # attempt. Not the kernel's failure -- the loop reports it as a transport problem.
 TRANSPORT_ERROR_MARKER = "[jobs] TRANSPORT ERROR (the job could not be delivered):"

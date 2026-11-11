@@ -4,11 +4,12 @@ A ``SubmitConfig`` is read from ``operators/<op>/submit.toml`` (plus an optional
 gitignored ``submit.local.toml`` merged over it). ``forge run`` writes both from the
 machine's ``local.env``:
 
-* ``[repo] delivery`` -- ``local`` (this machine) or ``ssh`` (one ssh host);
+* ``[repo] delivery`` -- ``local``, ``ssh`` or ``kubectl``;
   ``branch`` -- the tree's branch a job runs; ``entry_script`` -- gpu_entry.sh;
 * ``[exec]`` -- ``gpu`` (the CUDA device index), and for ssh ``host`` (an ssh alias that
   logs in without a prompt), ``workdir`` (an absolute directory on the host) and an
-  optional ``env_file`` the job sources first;
+  optional ``env_file`` the job sources first. kubectl uses ``namespace``, ``pod``,
+  ``container`` and optional ``kubeconfig`` with the same remote paths;
 * ``[job] timeout`` -- seconds one gpu_entry task may take;
 * ``[env]`` -- environment for the job (secrets in ``submit.local.toml``).
 """
@@ -19,9 +20,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from forgekernel.localenv import DELIVERIES, DELIVERY_KUBECTL, DELIVERY_SSH, is_remote_workdir
 from forgekernel.paths import operators_dir
-
-DELIVERIES = ("local", "ssh")
 
 # [env] names that are secrets: a sealed reference's key (FK_REF_KEY, or the name a bench
 # gives it). The ssh transport keeps them off every command line it builds (read off
@@ -47,12 +47,20 @@ class SubmitConfig:
     exec_workdir: str = ""
     exec_env_file: str = ""
     exec_gpu: str = "0"
+    exec_kubeconfig: str = ""
+    exec_namespace: str = ""
+    exec_pod: str = ""
+    exec_container: str = ""
 
     @property
     def cluster(self) -> str:
-        """Where this tree's jobs run ("local", or the ssh host): readings taken on two
-        machines are not compared as one."""
-        return self.exec_host if self.delivery == "ssh" else "local"
+        """Where jobs run, so readings from different machines are kept separate."""
+        if self.delivery == DELIVERY_SSH:
+            return self.exec_host
+        if self.delivery == DELIVERY_KUBECTL:
+            config = self.exec_kubeconfig or "current-context"
+            return f"kubectl:{config}:{self.exec_namespace}/{self.exec_pod}:{self.exec_container}"
+        return "local"
 
 
 def _repo_root() -> Path:
@@ -89,9 +97,14 @@ def load_config(op: str, base_dir: str | Path | None = None) -> SubmitConfig:
         raise ValueError(f"invalid [repo] delivery {delivery!r}; expected one of {DELIVERIES}")
     host = str(ex.get("host", ""))
     workdir = str(ex.get("workdir", ""))
-    if delivery == "ssh" and (not host or not workdir.startswith("/")):
+    if delivery == DELIVERY_SSH and (not host or not workdir.startswith("/")):
         raise ValueError(f"{main}: ssh delivery needs [exec] host and an absolute "
                          f"[exec] workdir")
+    namespace, pod, container = (str(ex.get(key, "")) for key in ("namespace", "pod", "container"))
+    if delivery == DELIVERY_KUBECTL and (not is_remote_workdir(workdir)
+            or any(not value or value.startswith("-") for value in (namespace, pod, container))):
+        raise ValueError(f"{main}: kubectl delivery needs [exec] namespace, pod, container "
+                         "and a dedicated absolute workdir")
     return SubmitConfig(
         branch=repo["branch"],
         entry_script=repo.get("entry_script", "gpu_entry.sh"),
@@ -104,6 +117,10 @@ def load_config(op: str, base_dir: str | Path | None = None) -> SubmitConfig:
         exec_workdir=workdir,
         exec_env_file=str(ex.get("env_file", "")),
         exec_gpu=str(ex.get("gpu", "0")),
+        exec_kubeconfig=str(ex.get("kubeconfig", "")),
+        exec_namespace=namespace,
+        exec_pod=pod,
+        exec_container=container,
     )
 
 

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from forgekernel.inner.ncu import kernels_from_ncu, profiler_from_ncu
+from forgekernel.submit.jobs import REMOTE_EXIT_MARKER
 from forgekernel.skills.sass_census import parse_census_line, parse_serial_line
 from forgekernel.loop.job_env import env_failure
 from forgekernel.loop import harness_guard, precision_gate
@@ -109,6 +110,8 @@ def archive_is_whole(log: str, task: str = "") -> bool:
     at that point is exactly the truncated tail this check exists to refuse.
     """
     lines = [ln for ln in log.splitlines() if ln.strip()]
+    if lines and lines[-1].strip() == REMOTE_EXIT_MARKER:
+        lines.pop()
     if not lines:
         return False
     m = ENTRY_DONE_RE.match(lines[-1].strip())

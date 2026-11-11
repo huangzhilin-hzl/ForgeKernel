@@ -1,4 +1,4 @@
-"""Run one gpu_entry task on this machine (``local``) or on one ssh host (``ssh``).
+"""Run one gpu_entry task locally, over SSH, or in a Kubernetes container.
 
 A job's bookkeeping (its id, log, verdict, the detached runner) is forgekernel.submit.jobs;
 this module is what the runner does.
@@ -11,7 +11,7 @@ One run:
 2. Take the GPU lock, then ``bash gpu_entry.sh <mode>`` with the tree's ``[env]``,
    ``CUDA_VISIBLE_DEVICES`` and ``TASK_TIMEOUT``. The lock is per GPU and per machine
    (two runs on one GPU would time each other), shared by every op and every run.
-3. Map the exit: rc 0 -> Succeeded; the task ran and failed -> Failed; ssh could not
+3. Map the exit: rc 0 -> Succeeded; the task ran and failed -> Failed; transport could not
    deliver it (no begin marker) -> retried, then Failed with TRANSPORT_ERROR_MARKER, which
    the loop reports as a transport problem rather than charging the kernel.
 
@@ -34,13 +34,14 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from forgekernel.localenv import DELIVERY_KUBECTL
 from forgekernel.submit.config import SubmitConfig, is_secret_env
-from forgekernel.submit.jobs import (BEGIN_MARKER, RUN_HEADROOM_S, STATUS_FAILED,
+from forgekernel.submit.jobs import (BEGIN_MARKER, REMOTE_EXIT_MARKER, RUN_HEADROOM_S, STATUS_FAILED,
                                      STATUS_SUCCEEDED, TRANSPORT_ERROR_MARKER, locked)
 
 LOCAL_TREE = ".exec/tree"
 CMD_PREFIX = "cmd:"
-# On the ssh host a job runs in a session of its own, and its session id is written here
+# On a remote machine a job runs in a session of its own, and its session id is written here
 # (in the job's tree): stopping the job ends its whole session. A process group is not
 # enough -- gpu_entry's `timeout` moves itself and the task into a group of their own.
 SESSION_FILE = ".fk_job.sid"
@@ -133,7 +134,7 @@ class DirectRunner:
             payload = _payload(self.cfg, branch)
             if self.cfg.delivery == "local":
                 return self._run_local(payload, branch, mode, log_file)
-            return self._run_ssh(payload, branch, mode, log_file)
+            return self._run_remote(payload, branch, mode, log_file)
 
     # -- local ----------------------------------------------------------------------------
 
@@ -168,9 +169,18 @@ class DirectRunner:
         log_file.flush()
         return STATUS_FAILED
 
-    # -- ssh ------------------------------------------------------------------------------
+    # -- remote ---------------------------------------------------------------------------
 
-    def _ssh(self, remote_cmd: str) -> list[str]:
+    def _remote(self, remote_cmd: str, *, stdin: bool = False) -> list[str]:
+        if self.cfg.delivery == DELIVERY_KUBECTL:
+            argv = ["kubectl"]
+            if self.cfg.exec_kubeconfig:
+                argv += ["--kubeconfig", self.cfg.exec_kubeconfig]
+            argv += ["--namespace", self.cfg.exec_namespace, "exec", self.cfg.exec_pod,
+                     "--container", self.cfg.exec_container]
+            if stdin:
+                argv.append("--stdin")
+            return [*argv, "--", "sh", "-c", remote_cmd]
         return ["ssh", *SSH_OPTS, self.cfg.exec_host, remote_cmd]
 
     def _extract_cmd(self) -> str:
@@ -191,7 +201,12 @@ class DirectRunner:
         entry = " ".join(shlex.quote(a) for a in _entry_argv(self.cfg, mode))
         parts.append(f"echo {BEGIN_MARKER}")
         parts.append(f"setsid --wait sh -c {shlex.quote(_SESSION_SCRIPT)} {lock} {entry}")
-        return " && ".join(parts)
+        command = " && ".join(parts)
+        if self.cfg.delivery == DELIVERY_KUBECTL:
+            # A lost kubectl stream can fail after the job begins. Mark a remote
+            # shell exit separately so a transport error is not charged to the kernel.
+            command += f'; rc=$?; printf "\\n%s\\n" {REMOTE_EXIT_MARKER}; exit "$rc"'
+        return command
 
     def _stop_cmd(self) -> str:
         f = shlex.quote(f"{remote_tree(self.cfg)}/{SESSION_FILE}")
@@ -199,32 +214,44 @@ class DirectRunner:
                 f"sleep {STOP_GRACE_S}; pkill -KILL -s \"$s\"; rm -f {f}; exit 0")
 
     def _stop_remote(self, log_file) -> None:
-        """End the job's session on the host (the ssh client going away does not)."""
+        """End the job's session on the remote machine."""
+        target = self.cfg.cluster
         try:
-            self._run(self._ssh(self._stop_cmd()), capture_output=True, timeout=120)
-            log_file.write(f"[direct] stopped the job's session on {self.cfg.exec_host}\n")
+            result = self._run(self._remote(self._stop_cmd()), capture_output=True, timeout=120)
+            if result.returncode:
+                log_file.write(f"[direct] could not stop the job on {target}: rc={result.returncode}\n")
+            else:
+                log_file.write(f"[direct] stopped the job's session on {target}\n")
         except Exception as e:  # noqa: BLE001 -- best effort; the verdict is written either way
-            log_file.write(f"[direct] could not stop the job on {self.cfg.exec_host}: {e!r}\n")
+            log_file.write(f"[direct] could not stop the job on {target}: {e!r}\n")
         log_file.flush()
 
-    def _run_ssh(self, payload: bytes, branch: str, mode: str, log_file) -> str:
+    def _run_remote(self, payload: bytes, branch: str, mode: str, log_file) -> str:
         packed = lzma.compress(payload, preset=6)
         env = _job_env(self.cfg)
         secrets = "".join(f"{env[k]}\n" for k in sorted(env) if is_secret_env(k)) or None
         failures: list[str] = []
+        target = self.cfg.cluster
+        kubectl = self.cfg.delivery == DELIVERY_KUBECTL
+        label = target if kubectl else f"ssh {target}"
+        sync_options = {"timeout": self.deadline_s} if kubectl else {}
         while True:
-            sync = self._run(self._ssh(self._extract_cmd()), input=packed, capture_output=True)
+            upload = self._remote(self._extract_cmd(), stdin=True)
+            try:
+                sync = self._run(upload, input=packed, capture_output=True, **sync_options)
+            except subprocess.TimeoutExpired:
+                sync = subprocess.CompletedProcess(upload, 124, stderr="upload timed out")
             if sync.returncode != 0:
                 err = sync.stderr.decode(errors="replace") if isinstance(sync.stderr, bytes) \
                     else str(sync.stderr or "")
-                failures.append(f"sync to {self.cfg.exec_host} (rc={sync.returncode}): "
+                failures.append(f"sync to {target} (rc={sync.returncode}): "
                                 f"{err.strip()[-200:]}")
             else:
-                log_file.write(f"[direct] ssh {self.cfg.exec_host} GPU {self.cfg.exec_gpu} "
+                log_file.write(f"[direct] {label} GPU {self.cfg.exec_gpu} "
                                f"branch={branch} mode={mode}\n")
                 log_file.flush()
                 start = log_file.tell() if hasattr(log_file, "tell") else None
-                proc = self._popen(self._ssh(self._exec_cmd(mode)), stdout=log_file,
+                proc = self._popen(self._remote(self._exec_cmd(mode), stdin=bool(secrets)), stdout=log_file,
                                    stderr=subprocess.STDOUT, text=True,
                                    stdin=subprocess.PIPE if secrets else subprocess.DEVNULL,
                                    start_new_session=True)
@@ -247,17 +274,23 @@ class DirectRunner:
                     self._stop_remote(log_file)
                     _kill_group(proc)
                     raise
-                if rc == 0:
+                completed = not kubectl or _began(log_file, start, REMOTE_EXIT_MARKER)
+                if rc == 0 and completed:
                     return STATUS_SUCCEEDED
                 if _began(log_file, start, BEGIN_MARKER):
-                    log_file.write(f"[direct] gpu_entry {mode} exited rc={rc}\n")
+                    if completed:
+                        log_file.write(f"[direct] gpu_entry {mode} exited rc={rc}\n")
+                    else:
+                        self._stop_remote(log_file)
+                        log_file.write(f"{TRANSPORT_ERROR_MARKER} kubectl stream ended before "
+                                       f"gpu_entry {mode} exited on {target}\n")
                     log_file.flush()
                     return STATUS_FAILED
-                failures.append(f"gpu_entry {mode} on {self.cfg.exec_host} (rc={rc}, never "
+                failures.append(f"gpu_entry {mode} on {target} (rc={rc}, never "
                                 f"started)")
             if len(failures) >= TRANSPORT_ATTEMPTS:
                 log_file.write(f"{TRANSPORT_ERROR_MARKER} {len(failures)} transport failure(s) "
-                               f"on {self.cfg.exec_host}: {' | '.join(failures)}\n")
+                               f"on {target}: {' | '.join(failures)}\n")
                 log_file.flush()
                 return STATUS_FAILED
             log_file.write(f"[direct] {failures[-1]} -- retrying in {TRANSPORT_RETRY_S:.0f}s\n")

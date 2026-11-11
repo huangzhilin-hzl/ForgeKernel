@@ -110,6 +110,8 @@ cp local.env.example local.env
 # FK_DELIVERY=local -> the GPU on this machine (FK_GPU picks the device)
 # FK_DELIVERY=ssh   -> REMOTE_HOST (an ssh alias that logs in without a
 #                      prompt) and REMOTE_WORKDIR (a directory on it)
+# FK_DELIVERY=kubectl -> KUBECTL_NAMESPACE, KUBECTL_POD, KUBECTL_CONTAINER
+#                       and REMOTE_WORKDIR in the container
 ```
 
 **3. Run the example task**: fuse a PyTorch RMSNorm (nine kernel launches a call) into one CuTe DSL

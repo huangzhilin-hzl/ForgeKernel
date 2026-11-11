@@ -165,13 +165,14 @@ def test_the_gpu_lock_makes_a_second_run_wait(tmp_path, monkeypatch):
 class _FakeSsh:
     """Stands in for subprocess.run / Popen: records argv, plays a scripted remote."""
 
-    def __init__(self, outcomes):
+    def __init__(self, outcomes, *, remote_exit=True):
         self.outcomes = list(outcomes)   # per exec: (rc, began)
         self.runs: list = []
         self.execs: list = []
         self.stdin_text = ""
+        self.remote_exit = remote_exit
 
-    def run(self, argv, input=None, capture_output=False):
+    def run(self, argv, input=None, capture_output=False, timeout=None):
         self.runs.append((argv, input))
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -179,6 +180,8 @@ class _FakeSsh:
         rc, began = self.outcomes.pop(0)
         if began:
             stdout.write(f"{ds.BEGIN_MARKER}\nremote ok\n")
+            if argv[0] == "kubectl" and self.remote_exit:
+                stdout.write(f"{direct.REMOTE_EXIT_MARKER}\n")
         else:
             stdout.write("ssh: connect to host box port 22: Connection refused\n")
         stdout.flush()
@@ -255,6 +258,45 @@ def test_ssh_payload_failure_is_charged_without_retry(tmp_path):
     status, log = _ssh_run(cfg, fake)
     assert status == ds.STATUS_FAILED and "exited rc=1" in log
     assert ds.TRANSPORT_ERROR_MARKER not in log and len(fake.execs) == 1
+
+
+def _kubectl_cfg(tmp_path, env=""):
+    _op(tmp_path, delivery="kubectl", env=env,
+        exec_table='kubeconfig = "/local/kube config"\nnamespace = "ml"\npod = "gpu-worker"\n'
+                   'container = "workspace"\nworkdir = "/data/fk"\ngpu = "1"\n')
+    return load_config("op", base_dir=tmp_path)
+
+
+def test_kubectl_streams_archive_and_secret_without_a_tty(tmp_path):
+    cfg = _kubectl_cfg(tmp_path, env='FK_REF_KEY = "synthetic-key"\n')
+    fake = _FakeSsh([(0, True)])
+    status, _ = _ssh_run(cfg, fake)
+    assert status == ds.STATUS_SUCCEEDED
+    prefix = ["kubectl", "--kubeconfig", "/local/kube config", "--namespace", "ml",
+              "exec", "gpu-worker", "--container", "workspace"]
+    (upload, payload), = fake.runs
+    assert upload[:-1] == [*prefix, "--stdin", "--", "sh", "-c"]
+    assert "tar xJ -C " in upload[-1] and payload[:6] == b"\xfd7zXZ\x00"
+    assert fake.execs[0][:-1] == [*prefix, "--stdin", "--", "sh", "-c"]
+    assert "export CUDA_VISIBLE_DEVICES=1" in fake.execs[0][-1]
+    assert "synthetic-key" not in fake.execs[0][-1] and fake.stdin_text == "synthetic-key\n"
+    assert "ml/gpu-worker:workspace" in cfg.cluster
+
+
+def test_kubectl_stream_loss_after_start_is_a_transport_failure(tmp_path):
+    cfg = _kubectl_cfg(tmp_path)
+    fake = _FakeSsh([(1, True)], remote_exit=False)
+    status, log = _ssh_run(cfg, fake)
+    assert status == ds.STATUS_FAILED and ds.TRANSPORT_ERROR_MARKER in log
+    assert len(fake.execs) == 1
+    assert "--stdin" not in fake.execs[0]
+    assert "pkill -TERM" in fake.runs[-1][0][-1]
+
+
+def test_kubectl_remote_exit_is_a_kernel_failure(tmp_path):
+    status, log = _ssh_run(_kubectl_cfg(tmp_path), _FakeSsh([(7, True)]))
+    assert status == ds.STATUS_FAILED and "exited rc=7" in log
+    assert ds.TRANSPORT_ERROR_MARKER not in log
 
 
 # -- the submit facade ----------------------------------------------------------------------
