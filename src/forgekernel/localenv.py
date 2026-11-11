@@ -6,11 +6,13 @@ for any key both set, so a one-off ``FK_DELIVERY=ssh forge run ...`` needs no ed
 
 Keys the harness reads:
 
-    FK_DELIVERY      local | ssh                    (default: local)
+    FK_DELIVERY      local | ssh | kubectl           (default: local)
     FK_GPU           CUDA device index to run on    (default: 0)
     REMOTE_HOST      ssh: host alias; must log in non-interactively
-    REMOTE_WORKDIR   ssh: absolute directory on the host, dedicated to forgekernel
-    REMOTE_ENV_FILE  ssh, optional: sourced on the host before every command
+    REMOTE_WORKDIR   ssh/kubectl: dedicated absolute directory on the GPU machine
+    REMOTE_ENV_FILE  ssh/kubectl, optional: sourced before each GPU job
+    KUBECTL_KUBECONFIG, KUBECTL_NAMESPACE, KUBECTL_POD, KUBECTL_CONTAINER
+                     kubectl exec target on the machine running forge
 
 Every key in the file (credentials such as ``ANTHROPIC_API_KEY`` or
 ``CLAUDE_CODE_OAUTH_TOKEN`` included) is exported to the agents and the GPU jobs a run
@@ -20,6 +22,7 @@ starts; values are never printed.
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -30,7 +33,9 @@ from forgekernel.paths import repo_root
 LOCAL_ENV = "local.env"
 DELIVERY_LOCAL = "local"
 DELIVERY_SSH = "ssh"
-DELIVERIES = (DELIVERY_LOCAL, DELIVERY_SSH)
+DELIVERY_KUBECTL = "kubectl"
+DELIVERIES = (DELIVERY_LOCAL, DELIVERY_SSH, DELIVERY_KUBECTL)
+KUBECTL_KEYS = ("KUBECTL_KUBECONFIG", "KUBECTL_NAMESPACE", "KUBECTL_POD", "KUBECTL_CONTAINER")
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -50,10 +55,17 @@ class Machine:
     remote_workdir: str = ""
     remote_env_file: str = ""
     env: dict = field(default_factory=dict)   # every KEY=VALUE the file sets (merged)
+    kubectl_kubeconfig: str = ""
+    kubectl_namespace: str = ""
+    kubectl_pod: str = ""
+    kubectl_container: str = ""
 
     def describe(self) -> str:
         if self.delivery == DELIVERY_SSH:
             return f"ssh {self.remote_host}:{self.remote_workdir} (GPU {self.gpu})"
+        if self.delivery == DELIVERY_KUBECTL:
+            target = f"{self.kubectl_namespace}/{self.kubectl_pod}:{self.kubectl_container}"
+            return f"kubectl {target} {self.remote_workdir} (GPU {self.gpu})"
         return f"this machine (GPU {self.gpu})"
 
 
@@ -94,10 +106,11 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     """The machine ``local.env`` (under ``root``, the repository by default) describes,
     with the process environment taking precedence key by key."""
     environ = os.environ if environ is None else environ
-    file_env = read_env_file(Path(root if root is not None else repo_root()) / LOCAL_ENV)
+    root = Path(root) if root is not None else repo_root()
+    file_env = read_env_file(root / LOCAL_ENV)
     merged = dict(file_env)
     for k in list(file_env) + ["FK_DELIVERY", "FK_GPU", "REMOTE_HOST", "REMOTE_WORKDIR",
-                               "REMOTE_ENV_FILE"]:
+                               "REMOTE_ENV_FILE", *KUBECTL_KEYS]:
         if k in environ:
             merged[k] = environ[k]
     problems: list[str] = []
@@ -110,15 +123,32 @@ def load_machine(root: str | Path | None = None, environ=None) -> Machine:
     host = (merged.get("REMOTE_HOST") or "").strip()
     workdir = (merged.get("REMOTE_WORKDIR") or "").strip()
     env_file = (merged.get("REMOTE_ENV_FILE") or "").strip()
-    if delivery == DELIVERY_SSH:
-        if not host:
-            problems.append("FK_DELIVERY=ssh needs REMOTE_HOST (an ssh alias that logs in "
-                            "without a prompt)")
-        if not workdir.startswith("/") or workdir.rstrip("/") in ("", "/root", "/home", "/tmp"):
-            problems.append(f"FK_DELIVERY=ssh needs REMOTE_WORKDIR, an absolute directory on "
-                            f"the host used only by forgekernel (got {workdir!r}); each run "
-                            f"replaces trees under it")
+    kubeconfig, namespace, pod, container = ((merged.get(k) or "").strip() for k in KUBECTL_KEYS)
+    if delivery == DELIVERY_SSH and not host:
+        problems.append("FK_DELIVERY=ssh needs REMOTE_HOST (an ssh alias that logs in "
+                        "without a prompt)")
+    if delivery == DELIVERY_KUBECTL:
+        for key, value in zip(KUBECTL_KEYS[1:], (namespace, pod, container)):
+            if not value or value.startswith("-"):
+                problems.append(f"FK_DELIVERY=kubectl needs {key}")
+        if kubeconfig:
+            # local.env is not shell-evaluated. Accept the familiar home path spelling.
+            home = environ.get("HOME") or str(Path.home())
+            if kubeconfig.startswith("$HOME/"):
+                kubeconfig = home + kubeconfig[len("$HOME"):]
+            elif kubeconfig.startswith("~/"):
+                kubeconfig = home + kubeconfig[1:]
+            kubeconfig = str((root / Path(kubeconfig).expanduser()).resolve())
+    if delivery in (DELIVERY_SSH, DELIVERY_KUBECTL) and not is_remote_workdir(workdir):
+        problems.append(f"FK_DELIVERY={delivery} needs REMOTE_WORKDIR, a dedicated absolute "
+                        f"directory (got {workdir!r}); each run replaces its job tree under it")
     if problems:
         raise MachineError(problems)
     return Machine(delivery=delivery, gpu=gpu, remote_host=host, remote_workdir=workdir,
-                   remote_env_file=env_file, env=merged)
+                   remote_env_file=env_file, env=merged, kubectl_kubeconfig=kubeconfig,
+                   kubectl_namespace=namespace, kubectl_pod=pod, kubectl_container=container)
+
+
+def is_remote_workdir(path: str) -> bool:
+    return (path.startswith("/") and ".." not in path.split("/")
+            and posixpath.normpath("/" + path.lstrip("/")) not in ("/", "/root", "/home", "/tmp"))

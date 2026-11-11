@@ -279,6 +279,15 @@ def write_submit(tree: Path, task, machine, timeout: int = JOB_TIMEOUT_S) -> Pat
         "[exec]", f'host = {json.dumps(machine.remote_host)}',
         f'workdir = {json.dumps(machine.remote_workdir)}',
         f'env_file = {json.dumps(machine.remote_env_file)}', f'gpu = "{machine.gpu}"',
+    ]
+    if machine.delivery == "kubectl":
+        lines += [
+            f'kubeconfig = {json.dumps(machine.kubectl_kubeconfig)}',
+            f'namespace = {json.dumps(machine.kubectl_namespace)}',
+            f'pod = {json.dumps(machine.kubectl_pod)}',
+            f'container = {json.dumps(machine.kubectl_container)}',
+        ]
+    lines += [
         "[env]", 'PYTHONUNBUFFERED = "1"',
         f'CUTE_DSL_ARCH = "{CUTE_ARCH.get(task.arch, task.arch + "a")}"',
     ]

@@ -329,6 +329,7 @@ used up, or the teacher judges the target unreachable and the reachability check
 |---|---|
 | `local` | the GPU is on this machine; jobs run directly |
 | `ssh` | each job's code tree (`git archive`) is sent over ssh to a GPU machine, unpacked and run there, and the results are brought back |
+| `kubectl` | the same job archive and result stream go through `kubectl exec` in one container |
 
 The machine is described in `local.env` at the repository root (not in git), never in the task
 definition:
@@ -341,6 +342,25 @@ REMOTE_WORKDIR=/data/fk     # a directory on the host used only by forgekernel
 REMOTE_ENV_FILE=            # optional: a script sourced before every command
 ANTHROPIC_API_KEY=...
 ```
+
+For Kubernetes, set the target container in the same file. `REMOTE_WORKDIR` is a dedicated,
+writable directory in that container. The optional `REMOTE_ENV_FILE` is sourced there.
+
+```dotenv
+FK_DELIVERY=kubectl
+FK_GPU=0
+KUBECTL_KUBECONFIG=~/.kube/config
+KUBECTL_NAMESPACE=ml
+KUBECTL_POD=gpu-worker
+KUBECTL_CONTAINER=workspace
+REMOTE_WORKDIR=/workspace/forgekernel-jobs
+```
+
+Leaving `KUBECTL_KUBECONFIG` empty uses kubectl's usual configuration. Each job resolves and
+pins its context and API server before uploading the archive. Measurements record that target
+along with the Pod, container, and GPU index. The control machine needs `kubectl` and access to
+the Pod's exec subresource. The target container needs `sh`, `bash`, `tar`, `xz`, `setsid`,
+`flock`, `pkill` and the GPU toolchain for the task.
 
 - **Pre-start check**: before the loop, a very short NCU probe job runs on the target machine to see
   whether performance counters can be collected (§14, item 5).

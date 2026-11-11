@@ -297,7 +297,7 @@ def test_a_job_that_never_reached_the_gpu_machine_is_a_transport_error(monkeypat
         be.submit_gpu("br", "all")
 
 
-def _job_tree(tmp_path, monkeypatch, *, log: str | None, status: str):
+def _job_tree(tmp_path, monkeypatch, *, log: str | None, status: str, cluster: str = ""):
     """operators/demo with one finished job 77, the way its runner leaves it."""
     import json as _json
 
@@ -306,18 +306,21 @@ def _job_tree(tmp_path, monkeypatch, *, log: str | None, status: str):
     jd = op / ".jobs" / "77"
     jd.mkdir(parents=True)
     (op / "submit.toml").write_text('[repo]\ndelivery = "local"\nbranch = "main"\n')
-    (jd / "result.json").write_text(_json.dumps({"id": 77, "status": status}))
+    (jd / "result.json").write_text(_json.dumps({"id": 77, "status": status, "cluster": cluster}))
     if log is not None:
         (jd / "log.txt").write_text(log)
 
 
 def test_a_jobs_status_and_log_are_read_from_its_files(monkeypatch, tmp_path):
     from forgekernel.loop import cli
+    cluster = "kubectl:https://dev.example.invalid:dev:ml/worker:gpu:gpu=0"
     _job_tree(tmp_path, monkeypatch, log="PRICE-OK\n=== gpu_entry.sh done (task=cmd) ===\n",
-              status="Succeeded")
+              status="Succeeded", cluster=cluster)
     monkeypatch.setattr(cli, "_forge", lambda *a, **k: pytest.fail("no subprocess needed"))
     be = cli.RealBackend("demo", tmp_path, None, "n", "e", poll_s=0.0)
+    assert be.machine == "local"
     assert be._job_status("77") == "Succeeded"
+    assert be.last_cluster == cluster
     assert "PRICE-OK" in be._fetch_log("77", "Succeeded", task="cmd")
     be.last_job_id, be.last_mode = "77", "cmd:python3 x.py"
     assert "PRICE-OK" in be.reread_log("77")

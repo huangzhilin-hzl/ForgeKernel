@@ -114,6 +114,13 @@ def new_run(task, *, root: Path | None = None, machine=None, now=time.time) -> R
     else:
         raise RunError(f"could not allocate a run directory under {root}")
     shutil.copytree(task.dir, d / SNAPSHOT_DIR, ignore=_SNAPSHOT_IGNORE)
+    machine_info = None
+    if machine is not None:
+        machine_info = {"delivery": machine.delivery, "gpu": machine.gpu,
+                        "host": machine.remote_host or None}
+        if machine.delivery == "kubectl":
+            machine_info.update(host=None, namespace=machine.kubectl_namespace,
+                                pod=machine.kubectl_pod, container=machine.kubectl_container)
     rec = {
         "task": task.name,
         "task_source": str(task.dir),
@@ -122,8 +129,7 @@ def new_run(task, *, root: Path | None = None, machine=None, now=time.time) -> R
         "updated": _now(),
         "snapshot_sha256": snapshot_digest(d / SNAPSHOT_DIR),
         "forgekernel_commit": _harness_commit(),
-        "machine": ({"delivery": machine.delivery, "gpu": machine.gpu,
-                     "host": machine.remote_host or None} if machine is not None else None),
+        "machine": machine_info,
         "status": STATUS_CREATED,
     }
     _write_json(d / RUN_FILE, rec)

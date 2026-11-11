@@ -99,6 +99,7 @@ KEY_SOURCE_TEACHER_DENIES = "source_teacher_denies_ref"
 # spellings fail with a message that names the rule instead of a sandbox error.
 NETWORK_BASH_PREFIXES = (
     "curl", "wget", "aria2c", "scp", "sftp", "rsync", "ssh", "nc", "ncat", "telnet",
+    "kubectl",
     "git clone", "git fetch", "git pull", "git ls-remote", "git remote",
     "pip install", "pip download", "pip3 install", "pip3 download",
     "uv pip install", "uv add", "uv tool install",
@@ -111,7 +112,7 @@ NETWORK_BASH_PREFIXES = (
 # still denied — its GPU work goes through the loop, never through a job of its own (a
 # job it starts is outside the driver's ledger: unrecorded and invisible to the run's
 # own accounting).
-CLUSTER_BASH_PREFIXES = ("ssh", "scp", "rsync", "python -m forgekernel.submit",
+CLUSTER_BASH_PREFIXES = ("ssh", "scp", "rsync", "kubectl", "python -m forgekernel.submit",
                          "python3 -m forgekernel.submit")
 
 
@@ -585,6 +586,22 @@ def secret_files_for(repo_root: Path, op: str | None, teacher_trees) -> tuple[Pa
     return tuple(dict.fromkeys(out))
 
 
+def _kube_credentials(op: str | None) -> list[Path]:
+    from forgekernel.submit.config import load_config
+
+    if not op:
+        return []
+    try:
+        submit = load_config(op)
+    except (OSError, ValueError, KeyError):
+        return []
+    if submit.delivery != "kubectl":
+        return []
+    configs = ([submit.exec_kubeconfig] if submit.exec_kubeconfig
+               else os.environ.get("KUBECONFIG", "").split(os.pathsep))
+    return [_abs(Path.home() / ".kube"), *(_abs(path) for path in configs if path)]
+
+
 def from_config(cfg: dict, *, oracle_mode: str, repo_root: Path,
                 teacher_trees: list[Path],
                 dsl_source_dirs_default: tuple[Path, ...] | list[Path] = (),
@@ -604,7 +621,7 @@ def from_config(cfg: dict, *, oracle_mode: str, repo_root: Path,
             _abs(p) for p in lc.get(KEY_EXTRA_ALLOW_WRITE, []))),
         ref_source_paths=tuple(_abs(p) for p in lc.get(KEY_REF_SOURCE_PATHS, [])),
         ref_source_urls=tuple(u.strip() for u in lc.get(KEY_REF_SOURCE_URLS, []) if u.strip()),
-        teacher_trees=tuple(dict.fromkeys(_abs(p) for p in teacher_trees)),
+        teacher_trees=tuple(dict.fromkeys([*map(_abs, teacher_trees), *_kube_credentials(op)])),
         dsl_source_dirs=(tuple(_abs(p) for p in declared) if declared
                          else tuple(dict.fromkeys(_abs(p) for p in dsl_source_dirs_default))),
         secret_files=secret_files_for(repo_root, op, teacher_trees),

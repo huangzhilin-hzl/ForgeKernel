@@ -1,4 +1,4 @@
-"""forgekernel.submit.direct: local and ssh delivery of one gpu_entry task."""
+"""forgekernel.submit.direct: local, SSH and Kubernetes GPU job delivery."""
 
 from __future__ import annotations
 
@@ -165,13 +165,14 @@ def test_the_gpu_lock_makes_a_second_run_wait(tmp_path, monkeypatch):
 class _FakeSsh:
     """Stands in for subprocess.run / Popen: records argv, plays a scripted remote."""
 
-    def __init__(self, outcomes):
+    def __init__(self, outcomes, *, remote_exit=True):
         self.outcomes = list(outcomes)   # per exec: (rc, began)
         self.runs: list = []
         self.execs: list = []
         self.stdin_text = ""
+        self.remote_exit = remote_exit
 
-    def run(self, argv, input=None, capture_output=False):
+    def run(self, argv, input=None, capture_output=False, timeout=None):
         self.runs.append((argv, input))
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -179,6 +180,8 @@ class _FakeSsh:
         rc, began = self.outcomes.pop(0)
         if began:
             stdout.write(f"{ds.BEGIN_MARKER}\nremote ok\n")
+            if argv[0] == "kubectl" and self.remote_exit:
+                stdout.write(f"{direct.REMOTE_EXIT_MARKER}\n")
         else:
             stdout.write("ssh: connect to host box port 22: Connection refused\n")
         stdout.flush()
@@ -257,6 +260,111 @@ def test_ssh_payload_failure_is_charged_without_retry(tmp_path):
     assert ds.TRANSPORT_ERROR_MARKER not in log and len(fake.execs) == 1
 
 
+def _kubectl_cfg(tmp_path, env=""):
+    _op(tmp_path, delivery="kubectl", env=env,
+        exec_table='kubeconfig = "/local/kube config"\nnamespace = "ml"\npod = "gpu-worker"\n'
+                   'container = "workspace"\nworkdir = "/data/fk"\ngpu = "1"\n')
+    return load_config("op", base_dir=tmp_path)
+
+
+@pytest.fixture
+def kube_context(monkeypatch):
+    run = subprocess.run
+    selected = {"context": "dev", "server": "https://dev.example.invalid"}
+
+    def config_view(argv, **kwargs):
+        if argv[0] != "kubectl":
+            return run(argv, **kwargs)
+        assert argv[-5:] == ["config", "view", "--minify", "-o", "json"]
+        result = {"current-context": selected["context"],
+                  "clusters": [{"cluster": {"server": selected["server"]}}]}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(result), "")
+
+    monkeypatch.setattr(subprocess, "run", config_view)
+    return selected
+
+
+def test_kubectl_streams_archive_and_secret_on_the_pinned_target(tmp_path, monkeypatch, kube_context):
+    cfg = _kubectl_cfg(tmp_path, env='FK_REF_KEY = "synthetic-key"\n')
+    fake = _FakeSsh([(0, True)])
+    direct_runner = direct.DirectRunner
+
+    def upload(argv, **kwargs):
+        kube_context.update(context="prod", server="https://prod.example.invalid")
+        return fake.run(argv, **kwargs)
+
+    monkeypatch.setattr(direct, "DirectRunner",
+                        lambda c: direct_runner(c, run=upload, popen=fake.popen))
+    _, status, _ = _run(cfg)
+    assert status == ds.STATUS_SUCCEEDED
+    prefix = ["kubectl", "--kubeconfig", "/local/kube config", "--context", "dev",
+              "--server", "https://dev.example.invalid", "--namespace", "ml",
+              "exec", "gpu-worker", "--container", "workspace"]
+    (upload, payload), = fake.runs
+    assert upload[:-1] == [*prefix, "--stdin", "--", "sh", "-c"]
+    assert "tar xJ -C " in upload[-1] and payload[:6] == b"\xfd7zXZ\x00"
+    assert fake.execs[0][:-1] == [*prefix, "--stdin", "--", "sh", "-c"]
+    assert "export CUDA_VISIBLE_DEVICES=1" in fake.execs[0][-1]
+    assert "synthetic-key" not in fake.execs[0][-1] and fake.stdin_text == "synthetic-key\n"
+    expected = "kubectl:https://dev.example.invalid:dev:ml/gpu-worker:workspace:gpu=1"
+    assert ds.job_status(Path(cfg.op_dir), "1")["cluster"] == expected
+    assert cfg.cluster == expected
+    new_cfg = load_config("op", base_dir=tmp_path)
+    assert new_cfg.cluster == "kubectl:https://prod.example.invalid:prod:ml/gpu-worker:workspace:gpu=1"
+    new_cfg.exec_gpu = "2"
+    assert new_cfg.cluster.endswith(":gpu=2")
+
+
+def test_kubectl_stream_loss_after_start_is_a_transport_failure(tmp_path, kube_context):
+    cfg = _kubectl_cfg(tmp_path)
+    fake = _FakeSsh([(1, True)], remote_exit=False)
+    status, log = _ssh_run(cfg, fake)
+    assert status == ds.STATUS_FAILED and ds.TRANSPORT_ERROR_MARKER in log
+    assert len(fake.execs) == 1
+    assert "--stdin" not in fake.execs[0]
+    cleanup, _ = fake.runs[-1]
+    assert cleanup[:7] == fake.execs[0][:7]
+    assert "pkill -TERM" in cleanup[-1]
+
+
+def test_kubectl_remote_exit_is_a_kernel_failure(tmp_path, kube_context):
+    status, log = _ssh_run(_kubectl_cfg(tmp_path), _FakeSsh([(7, True)]))
+    assert status == ds.STATUS_FAILED and "exited rc=7" in log
+    assert ds.TRANSPORT_ERROR_MARKER not in log
+
+
+def test_missing_kubectl_is_reported_as_transport_failure(tmp_path, monkeypatch):
+    cfg = _kubectl_cfg(tmp_path)
+    run = subprocess.run
+
+    def missing(argv, **kwargs):
+        if argv[0] == "kubectl":
+            raise FileNotFoundError(2, "No such file or directory", "kubectl")
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    _, status, log = _run(cfg, "calibrate")
+    assert status == ds.STATUS_FAILED
+    assert ds.TRANSPORT_ERROR_MARKER in log
+    assert "cannot resolve kubectl context" in log and "No such file or directory" in log
+
+
+@pytest.mark.parametrize("phase", ["upload", "job"])
+def test_kubectl_spawn_errors_are_transport_failures(tmp_path, kube_context, phase):
+    fake = _FakeSsh([(0, True)])
+
+    def spawn_error(*args, **kwargs):
+        raise PermissionError("permission denied")
+
+    if phase == "upload":
+        fake.run = spawn_error
+    else:
+        fake.popen = spawn_error
+    status, log = _ssh_run(_kubectl_cfg(tmp_path), fake)
+    assert status == ds.STATUS_FAILED
+    assert f"{ds.TRANSPORT_ERROR_MARKER} cannot start kubectl {phase}:" in log
+
+
 # -- the submit facade ----------------------------------------------------------------------
 
 
@@ -284,3 +392,14 @@ def test_submit_dry_run_says_where_it_would_run(tmp_path, capsys):
     _op(tmp_path)
     assert submit_cli.main(["op", "submit", "--dry-run", "--base-dir", str(tmp_path)]) == 0
     assert "local delivery: would run gpu_entry all" in capsys.readouterr().out
+
+
+def test_kubectl_dry_run_names_pod_without_resolving_context(tmp_path, monkeypatch, capsys):
+    cfg = _kubectl_cfg(tmp_path)
+
+    def unexpected_resolution(cfg):
+        pytest.fail("dry run must not need kubectl")
+
+    monkeypatch.setattr(type(cfg), "kubectl_target", property(unexpected_resolution))
+    assert submit_cli.main(["op", "submit", "--dry-run", "--base-dir", str(tmp_path)]) == 0
+    assert "on ml/gpu-worker:workspace (GPU 1)" in capsys.readouterr().out
