@@ -109,7 +109,7 @@ endpoints). The "Default" column below is what `global_config/` holds.
 | | `timing` | no | `device` | the timing basis |
 | `[agent]` (both agents), `[agent.teacher]`, `[agent.student]` (one) | `backend` | no | `claude` | `claude` or `codex` |
 | | `provider` | no | `native` | where the tokens go: `native` = the CLI's own login state and environment; or a name from `backends.toml` |
-| | `model` | no | `claude-opus-5-5` | the model actually used is written into the run's snapshot |
+| | `model` | no | `claude-opus-5-5` for Claude, `default` for Codex | model ID for the selected CLI |
 | | `effort` | no | teacher `high`; student left to the CLI | reasoning effort |
 | | `timeout_s` | no | student 7200; teacher 14400 | one turn's wall-clock limit |
 | `[budget]` | `hours` | no | `4` | the inner loop's wall clock |
@@ -281,7 +281,8 @@ the run directory, the delivery) is as for an ordinary task. Details are in
   `model`, `effort`, `timeout_s`. The harness builds the command itself, so it can handle /goal
   sessions, session continuation, usage accounting and permission settings uniformly.
 - The Codex backend uses `codex exec` with per-role filesystem and network permission profiles and
-  native CLI authentication. Use `model = "default"` for the Codex CLI's built-in model selection.
+  native CLI authentication. Its default model setting, `"default"`, uses the CLI's built-in model selection.
+  Changing a role's backend resets inherited model and provider settings to the new backend's defaults.
   Reference generation via `/goal` and blackbox teacher URL restrictions use the Claude backend.
 - With `provider = "native"`, the CLI's own login state and environment decide where the tokens go;
   any other provider is an endpoint in `global_config/backends.toml`, whose key is read from the

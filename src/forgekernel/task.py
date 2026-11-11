@@ -43,7 +43,8 @@
 Configuration is read at two layers and merged in order, as ForgeTrain does:
 ``global_config/`` (models.toml gives every [agent] key a value, loop.toml every [target]
 and [budget] key) -> ``task.toml``. A deeper layer overrides single keys; for one agent the
-order is global [agent], global [agent.<role>], task [agent], task [agent.<role>]. A task
+order is global [agent], global [agent.<role>], task [agent], task [agent.<role>].
+A change of backend resets the inherited model and provider to that backend's defaults. A task
 that sets [target] ratio or ms replaces both of the global layer's. Validation runs on the
 merged result.
 
@@ -83,7 +84,8 @@ LANGUAGES = ("cutedsl", "cuda")
 # The loop's own language name for each task language (forgekernel.loop.lang_mode).
 LOOP_LANGUAGE = {"cutedsl": "cutedsl", "cuda": "cuda-sol"}
 TIMINGS = ("device", "e2e")
-BACKENDS = ("claude", "codex")
+DEFAULT_AGENT_MODELS = {"claude": "claude-opus-5-5", "codex": "default"}
+BACKENDS = tuple(DEFAULT_AGENT_MODELS)
 ROLES = ("teacher", "student")
 MIN_INPUT_GROUPS = 3
 
@@ -245,7 +247,8 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
 
     own = _read_toml(d / TASK_FILE, problems)
     _unknown_keys(own, problems)
-    cfg = merge_config(read_global_config(problems), own)
+    defaults = read_global_config(problems)
+    cfg = merge_config(defaults, own)
 
     t = _table(cfg, "task", problems)
     language = t.get("language")
@@ -274,8 +277,9 @@ def load_task(task_dir: str | Path, *, kb_root: Path | None = None,
                             "(sealed into its card at `forge new`); leave the table out")
     reference = _read_reference(d, cfg, problems)
     target = _read_target(cfg, problems)
-    teacher = _read_agent(cfg.get("agent", {}), "teacher", problems)
-    student = _read_agent(cfg.get("agent", {}), "student", problems)
+    global_agents, task_agents = defaults.get("agent", {}), own.get("agent", {})
+    teacher = _read_agent(global_agents, task_agents, "teacher", problems)
+    student = _read_agent(global_agents, task_agents, "student", problems)
     budget = _read_budget(cfg, problems)
     if teacher.backend == "codex" and board is None and reference is None:
         problems.append("[agent.teacher] Codex needs a [reference] for ordinary tasks. "
@@ -653,13 +657,20 @@ def _read_target(cfg: dict, problems: list[str]) -> Target:
                   ms=float(ms) if _positive(ms) else None, timing=timing)
 
 
-def _read_agent(agents: dict, role: str, problems: list[str]) -> AgentSpec:
-    """One agent's settings: [agent] with [agent.<role>] over it, already merged across the
-    layers (merge_config)."""
+def _read_agent(defaults: dict, agents: dict, role: str, problems: list[str]) -> AgentSpec:
+    """Resolve one role's layered settings with backend-specific defaults."""
+    defaults = defaults if isinstance(defaults, dict) else {}
     agents = agents if isinstance(agents, dict) else {}
-    own = agents.get(role, {})
-    a = {**{k: v for k, v in agents.items() if not isinstance(v, dict)},
-         **(own if isinstance(own, dict) else {})}
+    a = {}
+    for layer in (defaults, defaults.get(role), agents, agents.get(role)):
+        if not isinstance(layer, dict):
+            continue
+        selected = layer.get("backend")
+        if selected in BACKENDS and selected != a.get("backend"):
+            backend_defaults = defaults if defaults.get("backend") == selected else {}
+            a.update(model=backend_defaults.get("model", DEFAULT_AGENT_MODELS[selected]),
+                     provider=backend_defaults.get("provider", provider_mod.NATIVE))
+        a.update(layer)
     where = f"[agent.{role}]"
     backend = a.get("backend")
     if backend not in BACKENDS:

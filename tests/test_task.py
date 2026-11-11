@@ -114,6 +114,22 @@ def test_codex_is_selected_per_role_and_needs_a_reference_for_the_teacher(tmp_pa
                   kb_root=_kb(tmp_path))
 
 
+def test_changing_backends_uses_the_new_backends_model_and_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(task_mod.provider_mod, "names", lambda: ("native", "example-gateway"))
+    role_only = WITH_REF + ('[agent]\nmodel = "claude-fable-5-1"\nprovider = "example-gateway"\n'
+                            '[agent.student]\nbackend = "codex"\n')
+    t = load_task(_task(tmp_path, role_only, files=REF_FILES), kb_root=_kb(tmp_path))
+    assert (t.teacher.backend, t.teacher.model, t.teacher.provider) == (
+        "claude", "claude-fable-5-1", "example-gateway")
+    assert (t.student.backend, t.student.model, t.student.provider) == ("codex", "default", "native")
+
+    shared = WITH_REF + ('[agent]\nbackend = "codex"\nmodel = "gpt-example"\n'
+                         '[agent.teacher]\nbackend = "claude"\n')
+    t = load_task(_task(tmp_path, shared, name="shared", files=REF_FILES), kb_root=_kb(tmp_path))
+    assert (t.teacher.backend, t.teacher.model) == ("claude", "claude-opus-5-5")
+    assert (t.student.backend, t.student.model) == ("codex", "gpt-example")
+
+
 def test_reference_without_source_is_blackbox(tmp_path):
     toml = MINIMAL + '[reference]\nrun = "reference/run.py:run"\n'
     t = load_task(_task(tmp_path, toml, files=REF_FILES), kb_root=_kb(tmp_path))

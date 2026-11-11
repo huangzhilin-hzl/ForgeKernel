@@ -396,7 +396,8 @@ class AgentPolicy:
         return settings_path
 
 
-def _git_exclude(workspace: Path, pattern: str) -> None:
+def _git_metadata_dirs(workspace: Path) -> tuple[Path, ...]:
+    """Resolve Git's administrative directories for a clone or linked worktree."""
     git_dir = workspace / ".git"
     if git_dir.is_file():
         # A linked worktree: .git is a file pointing at the per-worktree directory, and
@@ -405,21 +406,27 @@ def _git_exclude(workspace: Path, pattern: str) -> None:
         try:
             line = git_dir.read_text(encoding="utf-8").strip()
         except OSError:
-            return
+            return ()
         if not line.startswith("gitdir:"):
-            return
-        target = Path(line.split(":", 1)[1].strip())
-        git_dir = target if target.is_absolute() else (workspace / target)
+            return ()
+        git_dir = (workspace / line.partition(":")[2].strip()).resolve()
         common = git_dir / "commondir"
         if common.is_file():
             try:
                 rel = common.read_text(encoding="utf-8").strip()
             except OSError:
-                return
-            git_dir = Path(rel) if Path(rel).is_absolute() else (git_dir / rel)
+                return ()
+            return git_dir, (git_dir / rel).resolve()
     if not git_dir.is_dir():
+        return ()
+    return (git_dir.resolve(),)
+
+
+def _git_exclude(workspace: Path, pattern: str) -> None:
+    metadata = _git_metadata_dirs(workspace)
+    if not metadata or not metadata[-1].is_dir():
         return
-    exclude = git_dir / "info" / "exclude"
+    exclude = metadata[-1] / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     if pattern not in existing.splitlines():
