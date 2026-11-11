@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib
 import subprocess
+
+import pytest
 from pathlib import Path
 
 from forgekernel import skills
@@ -45,3 +47,27 @@ def test_mirror_copies_every_skill_into_the_workspace(tmp_path):
     (ws / ".claude" / "skills" / "sass" / "stale.txt").write_text("left by a turn")
     skills.mirror(ws)
     assert not (ws / ".claude" / "skills" / "sass" / "stale.txt").exists()
+
+
+@pytest.mark.parametrize("linked", [".agents", ".agents/skills", ".agents/skills/probe"])
+def test_mirror_refuses_linked_destination_components(tmp_path, monkeypatch, linked):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    source = tmp_path / "source" / "probe"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("new contents")
+    monkeypatch.setattr(skills, "skill_dirs", lambda: [source])
+
+    outside = tmp_path / "outside"
+    existing = outside / "skills" / "probe"
+    existing.mkdir(parents=True)
+    (existing / "SKILL.md").write_text("existing contents")
+    link = ws / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    target = {".agents": outside, ".agents/skills": existing.parent,
+              ".agents/skills/probe": existing}[linked]
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="unsafe skill mirror directory"):
+        skills.mirror(ws, relpath=Path(".agents/skills"))
+    assert (existing / "SKILL.md").read_text() == "existing contents"

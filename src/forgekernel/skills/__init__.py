@@ -12,7 +12,13 @@ Inside a tree the scripts sit side by side in ``notes/`` and import each other b
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
+import stat
+import tempfile
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 from forgekernel.paths import skills_dir
@@ -27,17 +33,56 @@ def skill_dirs() -> list[Path]:
     return sorted(d for d in root.iterdir() if (d / SKILL_FILE).is_file()) if root.is_dir() else []
 
 
-def mirror(workspace: Path) -> list[str]:
-    """Copy every skill into ``<workspace>/.claude/skills/<name>/`` (the caller keeps
-    ``.claude/`` out of git), replacing whatever a previous turn left there."""
-    dst_root = Path(workspace) / MIRROR_RELPATH
-    names = []
-    for d in skill_dirs():
-        dst = dst_root / d.name
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(d, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        names.append(d.name)
-    return names
+def mirror(workspace: Path, *, relpath: Path = MIRROR_RELPATH,
+           prepare: Callable[[Path], None] | None = None) -> list[str]:
+    """Copy each skill into the agent's workspace, replacing the previous copy."""
+    if relpath.is_absolute() or not relpath.parts or ".." in relpath.parts:
+        raise ValueError(f"skill mirror path must be relative to the workspace: {relpath}")
+    sources = skill_dirs()
+    if not sources:
+        return []
+    workspace = Path(workspace).resolve()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        # Pin each directory so a workspace symlink cannot redirect host-side writes.
+        dst_fd = os.open(workspace, flags)
+        stack.callback(os.close, dst_fd)
+        for part in relpath.parts:
+            try:
+                os.mkdir(part, dir_fd=dst_fd)
+            except FileExistsError:
+                pass
+            try:
+                dst_fd = os.open(part, flags, dir_fd=dst_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError(f"unsafe skill mirror directory: {workspace / relpath}") from exc
+                raise
+            stack.callback(os.close, dst_fd)
+
+        existing = set()
+        for source in sources:
+            try:
+                info = os.stat(source.name, dir_fd=dst_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"unsafe skill mirror directory: {workspace / relpath / source.name}")
+            existing.add(source.name)
+
+        # Prepare complete copies before replacing any existing directory.
+        stage = Path(stack.enter_context(tempfile.TemporaryDirectory(
+            dir=workspace, prefix=".forgekernel-skills-")))
+        for source in sources:
+            copy = stage / source.name
+            shutil.copytree(source, copy, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            if prepare is not None:
+                prepare(copy / SKILL_FILE)
+        for source in sources:
+            if source.name in existing:
+                shutil.rmtree(source.name, dir_fd=dst_fd)
+            os.rename(stage / source.name, source.name, dst_dir_fd=dst_fd)
+    return [source.name for source in sources]
 
 
 __path__ = [str(d) for d in skill_dirs()]

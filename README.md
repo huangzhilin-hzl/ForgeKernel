@@ -196,6 +196,19 @@ can name, with the key read from `local.env`. The defaults are a 1.2× target in
 4 hours of loop, 3 teacher rounds, and `claude-opus-5-5` for both agents (the paper's runs used
 Claude Fable 5.1 as the arch agent and Claude Opus 5 as the coding agent).
 
+For a task with a runnable reference, add this setting to `task.toml` to run both agents with Codex.
+
+```toml
+[agent]
+backend = "codex"
+```
+
+Log in to the Codex CLI on the machine running `forge`. The adapter uses the CLI's default model
+unless you set an explicit model ID. It needs a Codex CLI with permission profiles.
+The `/goal` session that generates a missing reference and teacher turns with blackbox URL
+restrictions use Claude Code. Set either backend independently under `[agent.teacher]` or
+`[agent.student]`.
+
 ## Self-Evolution
 
 ```bash
