@@ -16,8 +16,11 @@ machine's ``local.env``:
 
 from __future__ import annotations
 
+import json
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 from forgekernel.localenv import DELIVERIES, DELIVERY_KUBECTL, DELIVERY_SSH, is_remote_workdir
@@ -32,6 +35,16 @@ SECRET_ENV_SUFFIX = "_REF_KEY"
 
 def is_secret_env(name: str) -> bool:
     return str(name).endswith(SECRET_ENV_SUFFIX)
+
+
+class KubectlTargetError(ValueError):
+    """The local kubectl configuration cannot select a job target."""
+
+
+@dataclass(frozen=True)
+class KubectlTarget:
+    context: str
+    server: str
 
 
 @dataclass
@@ -53,13 +66,52 @@ class SubmitConfig:
     exec_container: str = ""
 
     @property
+    def destination(self) -> str:
+        """Human-readable target from the card, without invoking kubectl."""
+        if self.delivery == DELIVERY_KUBECTL:
+            return f"{self.exec_namespace}/{self.exec_pod}:{self.exec_container}"
+        if self.delivery == DELIVERY_SSH:
+            return self.exec_host
+        return "this machine"
+
+    @property
+    def kubectl_command(self) -> list[str]:
+        argv = ["kubectl"]
+        if self.exec_kubeconfig:
+            argv += ["--kubeconfig", self.exec_kubeconfig]
+        return argv
+
+    @cached_property
+    def kubectl_target(self) -> KubectlTarget:
+        """Resolve the effective context locally, with kubectl's kubeconfig rules."""
+        try:
+            result = subprocess.run(
+                [*self.kubectl_command, "config", "view", "--minify", "-o", "json"],
+                capture_output=True, text=True, timeout=15, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.strip() or f"exit status {exc.returncode}"
+            raise KubectlTargetError(f"cannot resolve kubectl context: {detail}") from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KubectlTargetError(f"cannot resolve kubectl context: {exc}") from exc
+        try:
+            config = json.loads(result.stdout)
+            context = config["current-context"]
+            server = config["clusters"][0]["cluster"]["server"]
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise KubectlTargetError("kubectl config did not report a context and API server") from exc
+        if not isinstance(context, str) or not context or not isinstance(server, str) or not server:
+            raise KubectlTargetError("kubectl config did not report a context and API server")
+        return KubectlTarget(context, server)
+
+    @property
     def cluster(self) -> str:
         """Where jobs run, so readings from different machines are kept separate."""
         if self.delivery == DELIVERY_SSH:
             return self.exec_host
         if self.delivery == DELIVERY_KUBECTL:
-            config = self.exec_kubeconfig or "current-context"
-            return f"kubectl:{config}:{self.exec_namespace}/{self.exec_pod}:{self.exec_container}"
+            target = self.kubectl_target
+            return f"kubectl:{target.server}:{target.context}:{self.destination}:gpu={self.exec_gpu}"
         return "local"
 
 

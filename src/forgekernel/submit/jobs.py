@@ -10,7 +10,7 @@ State lives in ``operators/<op>/.jobs/<id>/``:
 
 * ``log.txt``     -- what gpu_entry printed (closed before the verdict is written, so
   the log of a finished job is whole);
-* ``result.json`` -- ``{"id": <id>, "status": "Succeeded" | "Failed"}``;
+* ``result.json`` -- job id, terminal status, and the resolved remote target when available;
 * ``runner.pid``  -- the runner's pid (a session leader: stopping it stops its group);
 * ``runner.log``  -- the runner process's own output (a crash before the log opens).
 
@@ -192,6 +192,7 @@ def runner_main(cfg: SubmitConfig, job_id: str, mode: str, branch: str) -> int:
 
     op_dir = Path(cfg.op_dir)
     status = STATUS_FAILED
+    runner = DirectRunner(cfg)
     log_path(op_dir, job_id).parent.mkdir(parents=True, exist_ok=True)
     # SIGTERM (`submit stop`) must become SystemExit so the finally below still writes a
     # verdict: a stopped job with none would read back as Lost and be resubmitted.
@@ -199,7 +200,7 @@ def runner_main(cfg: SubmitConfig, job_id: str, mode: str, branch: str) -> int:
     try:
         with open(log_path(op_dir, job_id), "a", encoding="utf-8") as lf:
             try:
-                status = DirectRunner(cfg).run_mode(branch, mode, lf)
+                status = runner.run_mode(branch, mode, lf)
             except SystemExit:
                 lf.write("[jobs] runner stopped (SIGTERM) -- recorded as Failed so nothing "
                          "resubmits it\n")
@@ -210,6 +211,9 @@ def runner_main(cfg: SubmitConfig, job_id: str, mode: str, branch: str) -> int:
     finally:
         res = result_path(op_dir, job_id)
         tmp = res.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"id": int(job_id), "status": status}), encoding="utf-8")
+        result = {"id": int(job_id), "status": status}
+        if runner.cluster:
+            result["cluster"] = runner.cluster
+        tmp.write_text(json.dumps(result), encoding="utf-8")
         tmp.replace(res)
     return 0 if status == STATUS_SUCCEEDED else 1

@@ -182,9 +182,7 @@ def parse_ref_stdout(text: str) -> dict:
 
 
 def _submit_cluster(op: str) -> str:
-    """The machine this op's jobs run on ("local" or the ssh host), for stamping
-    baseline provenance. "" when the submit config is unreadable — an unstamped
-    baseline is merely unguarded, not wrong."""
+    """The configured target, used when a job has no recorded cluster stamp."""
     try:
         from forgekernel.submit.config import load_config
         return load_config(op).cluster
@@ -252,6 +250,10 @@ def _measure(op: str, perf_mode: str, ncu_mode: str | None, *, repeat: int = 3,
             best_out, best_job, best_ms, marker = out, job, ms, "  <- best so far"
         print(f"[baseline] run {run}/{repeat}: {ms} ms (job {job or '?'}){marker}")
 
+    clusters = {r["cluster"] for r in parsed_runs if r["cluster"]}
+    if len(clusters) > 1:
+        raise RefMeasurementError("reference timings came from different GPU targets: "
+                                  + ", ".join(sorted(clusters)))
     if len(samples) > 1:
         spread = (max(samples) - min(samples)) / min(samples) * 100
         print(f"[baseline] {len(samples)} samples, spread {spread:.1f}% "
@@ -265,6 +267,9 @@ def _measure(op: str, perf_mode: str, ncu_mode: str | None, *, repeat: int = 3,
         for attempt in range(1, attempts + 1):
             ncu_out = be.submit_gpu(_branch_placeholder(), ncu_mode)
             if _looks_like_ncu_csv(ncu_out):
+                ncu_cluster = getattr(be, "last_cluster", "")
+                if clusters and ncu_cluster and ncu_cluster not in clusters:
+                    raise RefMeasurementError("reference timing and NCU jobs ran on different GPU targets")
                 break
             if attempt < attempts:
                 print(f"[baseline] NCU pass produced no CSV — retrying {attempt + 1}/{attempts}")
@@ -365,8 +370,9 @@ def measure_and_archive(op: str, op_dir: Path, spec: dict, *,
         raise RefMeasurementError("no ref_cmd and no ref_mode: nothing to measure")
     perf_mode = mode or f"cmd:{spec['ref_cmd']}"
     ncu_mode = f"cmd:{spec['ref_ncu_cmd']}" if spec.get("ref_ncu_cmd") else None
-    perf_out, ncu_csv, job, samples, _ = _measure(
+    perf_out, ncu_csv, job, samples, parsed_runs = _measure(
         op, perf_mode, ncu_mode, repeat=max(1, repeat), submit_op=spec.get("submit_op"))
+    cluster = next((r["cluster"] for r in parsed_runs if r["job"] == job and r["cluster"]), "")
     measured = parse_ref_stdout(perf_out)
     if "ms" not in measured:
         raise RefMeasurementError(
@@ -388,7 +394,7 @@ def measure_and_archive(op: str, op_dir: Path, spec: dict, *,
         ncu=profiler_from_ncu(ncu_csv) if ncu_csv else {},
         kernels=kernels_from_ncu(ncu_csv) if ncu_csv else [],
         samples_ms=samples, raw_stdout=perf_out[-4000:],
-        cluster=_submit_cluster(spec.get("submit_op") or op),
+        cluster=cluster or _submit_cluster(spec.get("submit_op") or op),
     )
     path = save_baseline(op_dir, baseline)
     print(f"[baseline] archived -> {path}")

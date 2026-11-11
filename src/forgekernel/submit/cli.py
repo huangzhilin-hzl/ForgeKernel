@@ -7,7 +7,7 @@
     python -m forgekernel.submit <op> stop   <job_id>
 
 ``submit`` detaches a runner and prints ``job=<id>`` (forgekernel.submit.jobs); the job
-runs on this machine or the tree's ssh host ([repo] delivery, forgekernel.submit.direct).
+runs locally, over SSH, or in a Kubernetes container ([repo] delivery).
 ``--dry-run`` says what would run without running it.
 """
 
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "submit":
         if args.dry_run:
             print(f"[submit] {cfg.delivery} delivery: would run gpu_entry {args.mode} of "
-                  f"branch {cfg.branch} on {cfg.exec_host or 'this machine'} "
+                  f"branch {cfg.branch} on {cfg.destination} "
                   f"(GPU {cfg.exec_gpu})")
             return 0
         jid = jobs.spawn_runner(cfg, args.mode, cfg.branch)

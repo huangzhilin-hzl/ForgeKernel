@@ -11745,9 +11745,8 @@ def _keep_reading_of(records, sha: str, window: str) -> float | None:
 
 
 def _job_node(be, job: str) -> str:
-    """Where a confirmation sample ran: the backend's machine when it names one (every
-    job on one machine is the SAME node draw), else the job itself."""
-    machine = getattr(be, "machine", "")
+    """Where a confirmation sample ran, preferring the completed job's stamp."""
+    machine = getattr(be, "last_cluster", "") or getattr(be, "machine", "")
     if isinstance(machine, str) and machine:
         return machine
     return f"job:{job}" if job and job != "?" else ""

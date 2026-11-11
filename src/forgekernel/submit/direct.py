@@ -35,7 +35,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from forgekernel.localenv import DELIVERY_KUBECTL
-from forgekernel.submit.config import SubmitConfig, is_secret_env
+from forgekernel.submit.config import KubectlTargetError, SubmitConfig, is_secret_env
 from forgekernel.submit.jobs import (BEGIN_MARKER, REMOTE_EXIT_MARKER, RUN_HEADROOM_S, STATUS_FAILED,
                                      STATUS_SUCCEEDED, TRANSPORT_ERROR_MARKER, locked)
 
@@ -124,6 +124,7 @@ class DirectRunner:
         self._run = run
         self._popen = popen
         self._sleep = sleep
+        self.cluster = ""
 
     @property
     def deadline_s(self) -> float:
@@ -173,11 +174,10 @@ class DirectRunner:
 
     def _remote(self, remote_cmd: str, *, stdin: bool = False) -> list[str]:
         if self.cfg.delivery == DELIVERY_KUBECTL:
-            argv = ["kubectl"]
-            if self.cfg.exec_kubeconfig:
-                argv += ["--kubeconfig", self.cfg.exec_kubeconfig]
-            argv += ["--namespace", self.cfg.exec_namespace, "exec", self.cfg.exec_pod,
-                     "--container", self.cfg.exec_container]
+            target = self.cfg.kubectl_target
+            argv = [*self.cfg.kubectl_command, "--context", target.context, "--server", target.server,
+                    "--namespace", self.cfg.exec_namespace, "exec", self.cfg.exec_pod,
+                    "--container", self.cfg.exec_container]
             if stdin:
                 argv.append("--stdin")
             return [*argv, "--", "sh", "-c", remote_cmd]
@@ -226,12 +226,21 @@ class DirectRunner:
             log_file.write(f"[direct] could not stop the job on {target}: {e!r}\n")
         log_file.flush()
 
+    def _transport_failure(self, log_file, detail: str) -> str:
+        log_file.write(f"{TRANSPORT_ERROR_MARKER} {detail}\n")
+        log_file.flush()
+        return STATUS_FAILED
+
     def _run_remote(self, payload: bytes, branch: str, mode: str, log_file) -> str:
         packed = lzma.compress(payload, preset=6)
         env = _job_env(self.cfg)
         secrets = "".join(f"{env[k]}\n" for k in sorted(env) if is_secret_env(k)) or None
         failures: list[str] = []
-        target = self.cfg.cluster
+        try:
+            target = self.cfg.cluster
+        except KubectlTargetError as exc:
+            return self._transport_failure(log_file, str(exc))
+        self.cluster = target
         kubectl = self.cfg.delivery == DELIVERY_KUBECTL
         label = target if kubectl else f"ssh {target}"
         sync_options = {"timeout": self.deadline_s} if kubectl else {}
@@ -241,6 +250,8 @@ class DirectRunner:
                 sync = self._run(upload, input=packed, capture_output=True, **sync_options)
             except subprocess.TimeoutExpired:
                 sync = subprocess.CompletedProcess(upload, 124, stderr="upload timed out")
+            except OSError as exc:
+                return self._transport_failure(log_file, f"cannot start {upload[0]} upload: {exc}")
             if sync.returncode != 0:
                 err = sync.stderr.decode(errors="replace") if isinstance(sync.stderr, bytes) \
                     else str(sync.stderr or "")
@@ -251,10 +262,13 @@ class DirectRunner:
                                f"branch={branch} mode={mode}\n")
                 log_file.flush()
                 start = log_file.tell() if hasattr(log_file, "tell") else None
-                proc = self._popen(self._remote(self._exec_cmd(mode), stdin=bool(secrets)), stdout=log_file,
-                                   stderr=subprocess.STDOUT, text=True,
-                                   stdin=subprocess.PIPE if secrets else subprocess.DEVNULL,
-                                   start_new_session=True)
+                command = self._remote(self._exec_cmd(mode), stdin=bool(secrets))
+                try:
+                    proc = self._popen(command, stdout=log_file, stderr=subprocess.STDOUT,
+                                       text=True, stdin=subprocess.PIPE if secrets else subprocess.DEVNULL,
+                                       start_new_session=True)
+                except OSError as exc:
+                    return self._transport_failure(log_file, f"cannot start {command[0]} job: {exc}")
                 if secrets:
                     try:
                         proc.stdin.write(secrets)
@@ -289,10 +303,9 @@ class DirectRunner:
                 failures.append(f"gpu_entry {mode} on {target} (rc={rc}, never "
                                 f"started)")
             if len(failures) >= TRANSPORT_ATTEMPTS:
-                log_file.write(f"{TRANSPORT_ERROR_MARKER} {len(failures)} transport failure(s) "
-                               f"on {target}: {' | '.join(failures)}\n")
-                log_file.flush()
-                return STATUS_FAILED
+                return self._transport_failure(
+                    log_file, f"{len(failures)} transport failure(s) on {target}: {' | '.join(failures)}"
+                )
             log_file.write(f"[direct] {failures[-1]} -- retrying in {TRANSPORT_RETRY_S:.0f}s\n")
             log_file.flush()
             self._sleep(TRANSPORT_RETRY_S)

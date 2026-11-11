@@ -325,7 +325,7 @@ class RealBackend:
 
     @property
     def machine(self) -> str:
-        """Where this op's jobs run ("local" or the ssh host); "" when unreadable."""
+        """Where the current submit configuration points; "" when unresolved."""
         try:
             from forgekernel.submit.config import load_config
             return load_config(self.op).cluster
@@ -525,9 +525,13 @@ class RealBackend:
         op_dir = self._op_dir()
         try:
             if op_dir is not None and is_job(op_dir, job):
-                return str(job_status(op_dir, job).get("status") or "")
-            out = _forge(self.op, "status", job).stdout
-            return str(json.loads(out.strip().splitlines()[-1]).get("status") or "")
+                result = job_status(op_dir, job)
+            else:
+                out = _forge(self.op, "status", job).stdout
+                result = json.loads(out.strip().splitlines()[-1])
+            if cluster := result.get("cluster"):
+                self.last_cluster = cluster
+            return str(result.get("status") or "")
         except Exception:
             return ""
 

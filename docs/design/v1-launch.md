@@ -356,9 +356,11 @@ KUBECTL_CONTAINER=workspace
 REMOTE_WORKDIR=/workspace/forgekernel-jobs
 ```
 
-Leaving `KUBECTL_KUBECONFIG` empty uses kubectl's usual configuration. The control machine
-needs access to the Pod's exec subresource. The target container needs `sh`, `bash`, `tar`,
-`xz`, `setsid`, `flock`, `pkill` and the GPU toolchain for the task.
+Leaving `KUBECTL_KUBECONFIG` empty uses kubectl's usual configuration. Each job resolves and
+pins its context and API server before uploading the archive. Measurements record that target
+along with the Pod, container, and GPU index. The control machine needs `kubectl` and access to
+the Pod's exec subresource. The target container needs `sh`, `bash`, `tar`, `xz`, `setsid`,
+`flock`, `pkill` and the GPU toolchain for the task.
 
 - **Pre-start check**: before the loop, a very short NCU probe job runs on the target machine to see
   whether performance counters can be collected (§14, item 5).

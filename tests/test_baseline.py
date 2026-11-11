@@ -236,14 +236,17 @@ def test_booleans_are_not_mistaken_for_measurements():
 class _FakeBackend:
     """Returns each queued stdout in turn, recording how many submits it saw."""
 
-    def __init__(self, outs):
+    def __init__(self, outs, clusters=()):
         self.outs = list(outs)
+        self.clusters = iter(clusters)
         self.submits = 0
         self.last_job_id = ""
+        self.last_cluster = ""
 
     def submit_gpu(self, branch, mode):
         self.submits += 1
         self.last_job_id = str(655000 + self.submits)
+        self.last_cluster = next(self.clusters, "")
         return self.outs.pop(0) if self.outs else ""
 
 
@@ -290,6 +293,29 @@ def test_repeat_keeps_the_fastest_sample(monkeypatch):
     assert parse_ref_stdout(perf)["ms"] == 2.3555
     assert samples == [2.8141, 2.3555, 2.3688], "every sample is kept, not just the best"
     assert job == "655002", "the job id must belong to the fastest run"
+
+
+def test_archived_baseline_uses_measured_job_target(monkeypatch, tmp_path):
+    from forgekernel import baseline_cli
+
+    cluster = "kubectl:https://dev.example.invalid:dev:ml/worker:gpu:gpu=0"
+    fake = _FakeBackend([json.dumps({"median_ms": 2.36})], clusters=[cluster])
+    _patch_backend(monkeypatch, fake)
+    monkeypatch.setattr(baseline_cli, "_submit_cluster", lambda _: "new-current-target")
+    baseline = baseline_cli.measure_and_archive("demo", tmp_path, {"ref_mode": "ref"}, repeat=1)
+    assert baseline.cluster == cluster
+
+
+@pytest.mark.parametrize("ncu_mode", [None, "ncu"])
+def test_reference_measurement_rejects_mixed_targets(monkeypatch, ncu_mode):
+    from forgekernel.baseline_cli import RefMeasurementError
+
+    perf = json.dumps({"median_ms": 2.36})
+    fake = _FakeBackend([perf, '"Metric Name","Metric Value"' if ncu_mode else perf],
+                        clusters=["dev", "prod"])
+    _patch_backend(monkeypatch, fake)
+    with pytest.raises(RefMeasurementError, match="different GPU targets"):
+        _measure("demo", "bench.py", ncu_mode, repeat=1 if ncu_mode else 2)
 
 
 def test_repeat_survives_a_run_that_never_produced_numbers(monkeypatch):
